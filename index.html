@@ -1,0 +1,1768 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>売上報告</title>
+<script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+<script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+<script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+<style>
+  html, body { margin: 0; padding: 0; background: #f6f3ee; }
+  #root { min-height: 100vh; }
+</style>
+</head>
+<body>
+<div id="root"></div>
+<script type="text/babel" data-presets="react">
+const { useState, useEffect, useCallback } = React;
+
+const YEN = (n) => `¥${Math.round(n).toLocaleString()}`;
+const WEEKDAYS = ["日", "月", "火", "水", "木", "金", "土"];
+
+const DENOMS = [
+  { key: "10000", label: "1万円札", value: 10000, keep: () => 0 },
+  { key: "5000", label: "5千円札", value: 5000, keep: () => 5 },
+  {
+    key: "1000",
+    label: "千円札",
+    value: 1000,
+    keep: (c, all) => (all && all["5000"] <= 2 ? 35 : 25),
+  },
+  { key: "500", label: "500円玉", value: 500, keep: () => 20 },
+  { key: "100", label: "100円玉", value: 100, keep: (c) => c },
+  { key: "50", label: "50円玉", value: 50, keep: (c) => c },
+  { key: "10", label: "10円玉", value: 10, keep: () => 0 },
+  { key: "5", label: "5円玉", value: 5, keep: () => 0 },
+  { key: "1", label: "1円玉", value: 1, keep: () => 0 },
+];
+
+function todayStr() {
+  const d = new Date();
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, "0");
+  const day = String(d.getDate()).padStart(2, "0");
+  return `${y}-${m}-${day}`;
+}
+
+function fmtDateJp(dateStr) {
+  const d = new Date(dateStr + "T00:00:00");
+  return `${d.getMonth() + 1}/${d.getDate()}(${WEEKDAYS[d.getDay()]})`;
+}
+
+function isDepositDay(dateStr) {
+  const d = new Date(dateStr + "T00:00:00");
+  const wd = d.getDay(); // 1=Mon, 5=Fri
+  return wd === 1 || wd === 5;
+}
+
+function toDateStr(d) {
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, "0");
+  const day = String(d.getDate()).padStart(2, "0");
+  return `${y}-${m}-${day}`;
+}
+
+function dateStrDaysAgo(n) {
+  const d = new Date();
+  d.setDate(d.getDate() - n);
+  return toDateStr(d);
+}
+
+function nthMonday(year, month, n) {
+  const d = new Date(year, month - 1, 1);
+  let count = 0;
+  while (d.getMonth() === month - 1) {
+    if (d.getDay() === 1) {
+      count++;
+      if (count === n) return d.getDate();
+    }
+    d.setDate(d.getDate() + 1);
+  }
+  return null;
+}
+
+function shunbunDay(year) {
+  return Math.floor(20.8431 + 0.242194 * (year - 1980) - Math.floor((year - 1980) / 4));
+}
+function shubunDay(year) {
+  return Math.floor(23.2488 + 0.242194 * (year - 1980) - Math.floor((year - 1980) / 4));
+}
+
+function getJapaneseHolidaySet(year) {
+  const raw = [
+    [year, 1, 1],
+    [year, 1, nthMonday(year, 1, 2)],
+    [year, 2, 11],
+    [year, 2, 23],
+    [year, 3, shunbunDay(year)],
+    [year, 4, 29],
+    [year, 5, 3],
+    [year, 5, 4],
+    [year, 5, 5],
+    [year, 7, nthMonday(year, 7, 3)],
+    [year, 8, 11],
+    [year, 9, nthMonday(year, 9, 3)],
+    [year, 9, shubunDay(year)],
+    [year, 10, nthMonday(year, 10, 2)],
+    [year, 11, 3],
+    [year, 11, 23],
+  ]
+    .filter(([, , d]) => d)
+    .map(([y, m, d]) => new Date(y, m - 1, d));
+
+  const set = new Set(raw.map(toDateStr));
+
+  // 振替休日: 祝日が日曜の場合、翌日以降の祝日でない日を休日にする
+  raw.forEach((d) => {
+    if (d.getDay() === 0) {
+      const sub = new Date(d);
+      do {
+        sub.setDate(sub.getDate() + 1);
+      } while (set.has(toDateStr(sub)));
+      set.add(toDateStr(sub));
+    }
+  });
+
+  return set;
+}
+
+const holidaySetCache = {};
+function isJapaneseHoliday(dateStr) {
+  const year = parseInt(dateStr.slice(0, 4), 10);
+  if (!holidaySetCache[year]) holidaySetCache[year] = getJapaneseHolidaySet(year);
+  return holidaySetCache[year].has(dateStr);
+}
+
+function isWeekendOrHoliday(dateStr) {
+  const d = new Date(dateStr + "T00:00:00");
+  const wd = d.getDay();
+  return wd === 0 || wd === 6 || isJapaneseHoliday(dateStr);
+}
+
+const TRACKED_PRODUCTS = ["コーヒー", "牛乳"];
+const BREAD_INGREDIENT_PRODUCTS = ["卵サンド", "サーモン", "牛しぐれ", "うなぎ", "明太子"];
+const SLICES_PER_LOAF = 18;
+const AVG_WINDOW_DAYS = 14;
+// デプロイしたGASウェブアプリのURL(.../exec で終わるもの)をここに貼り付けてください
+const GAS_SHEET_WEBAPP_URL = "https://script.google.com/macros/s/AKfycbyMkOjuRbRunsrRpwydC-QVDHFLV_iPsrLD4bRsU8OV6XeZ-tHX3-w93Jt6CO5N9CoV/exec";
+
+// Googleスプレッドシート(GAS)を保存先として使うための共通関数
+// window.storage.get/set と互換の形({value}を返す/nullを返す)にしてある
+async function storageGet(key) {
+  const res = await fetch(GAS_SHEET_WEBAPP_URL, {
+    method: "POST",
+    headers: { "Content-Type": "text/plain;charset=utf-8" },
+    body: JSON.stringify({ action: "get", key }),
+  });
+  const json = await res.json();
+  if (!json || !json.ok || json.value === null || json.value === undefined) return null;
+  return { value: json.value };
+}
+
+async function storageSet(key, value) {
+  const res = await fetch(GAS_SHEET_WEBAPP_URL, {
+    method: "POST",
+    headers: { "Content-Type": "text/plain;charset=utf-8" },
+    body: JSON.stringify({ action: "set", key, value }),
+  });
+  return res.json();
+}
+const MIGRATION_WINDOW_DAYS = 31;
+
+function weightedAverage(entries, key, wantWeekend) {
+  const filtered = entries.filter((e) => e.isWeekend === wantWeekend);
+  if (filtered.length === 0) return null;
+  let sumW = 0;
+  let sumWV = 0;
+  filtered.forEach((e) => {
+    const w = AVG_WINDOW_DAYS - e.daysAgo;
+    sumW += w;
+    sumWV += w * e[key];
+  });
+  return sumW > 0 ? sumWV / sumW : null;
+}
+
+const emptyCounts = () =>
+  Object.fromEntries(DENOMS.map((d) => [d.key, ""]));
+
+function DailyCashReport() {
+  const [loading, setLoading] = useState(true);
+  const [apiKey, setApiKey] = useState(() => {
+    try {
+      return localStorage.getItem("claude_api_key") || "";
+    } catch (e) {
+      return "";
+    }
+  });
+  const [apiKeyDraft, setApiKeyDraft] = useState("");
+  const [apiKeySaved, setApiKeySaved] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [savedFlash, setSavedFlash] = useState(false);
+  const [error, setError] = useState("");
+
+  const [date] = useState(todayStr());
+  const [staffName, setStaffName] = useState("");
+  const [cardSales, setCardSales] = useState("");
+  const [cashSales, setCashSales] = useState("");
+  const [grossProfit, setGrossProfit] = useState("");
+  const [prevRegisterCash, setPrevRegisterCash] = useState("");
+  const [cumulativeCounts, setCumulativeCounts] = useState({});
+  const [counts, setCounts] = useState(emptyCounts());
+  const [products, setProducts] = useState([{ name: "だし巻き卵サンド", qty: "" }]);
+  const [trackedHistory, setTrackedHistory] = useState([]);
+  const [hasSavedToday, setHasSavedToday] = useState(false);
+  const [sheetSyncStatus, setSheetSyncStatus] = useState(""); // "" | "sending" | "success" | "error"
+  const [sheetSyncError, setSheetSyncError] = useState("");
+  const markDirty = () => setHasSavedToday(false);
+
+  const [ocrLoading, setOcrLoading] = useState(""); // "" | "products"
+  const [ocrError, setOcrError] = useState("");
+  const [ocrNotice, setOcrNotice] = useState("");
+
+  const [showMigration, setShowMigration] = useState(false);
+  const [importText, setImportText] = useState("");
+  const [migrationNotice, setMigrationNotice] = useState("");
+  const [migrationError, setMigrationError] = useState("");
+  const [migrationBusy, setMigrationBusy] = useState(false);
+  const [exportFlash, setExportFlash] = useState(false);
+
+  const [monthlyPastTotal, setMonthlyPastTotal] = useState(0);
+  const [monthlyPastDays, setMonthlyPastDays] = useState(0);
+
+  const fileToResizedBase64 = (file, maxDim = 1600, quality = 0.85) =>
+    new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onerror = () => reject(new Error("画像の読み込みに失敗しました"));
+      reader.onload = () => {
+        const img = new Image();
+        img.onerror = () => reject(new Error("画像の読み込みに失敗しました"));
+        img.onload = () => {
+          try {
+            let { width, height } = img;
+            if (width > maxDim || height > maxDim) {
+              if (width > height) {
+                height = Math.round((height * maxDim) / width);
+                width = maxDim;
+              } else {
+                width = Math.round((width * maxDim) / height);
+                height = maxDim;
+              }
+            }
+            const canvas = document.createElement("canvas");
+            canvas.width = width;
+            canvas.height = height;
+            const ctx = canvas.getContext("2d");
+            ctx.fillStyle = "#fff";
+            ctx.fillRect(0, 0, width, height);
+            ctx.drawImage(img, 0, 0, width, height);
+            const dataUrl = canvas.toDataURL("image/jpeg", quality);
+            resolve(dataUrl.split(",")[1]);
+          } catch (err) {
+            reject(new Error("画像の変換に失敗しました"));
+          }
+        };
+        img.src = reader.result;
+      };
+      reader.readAsDataURL(file);
+    });
+
+  const handlePhotoUpload = async (e) => {
+    const file = e.target.files && e.target.files[0];
+    e.target.value = "";
+    if (!file) return;
+    setOcrLoading("products");
+    setOcrError("");
+    setOcrNotice("");
+    if (!apiKey.trim()) {
+      setOcrError("先に上の「Claude APIキー」欄にキーを入力・保存してください。");
+      return;
+    }
+    try {
+      const base64 = await fileToResizedBase64(file);
+      const mediaType = "image/jpeg";
+
+      const promptText =
+        "これはPOSレジ(エアレジ等)の商品別売上(点数)一覧画面の写真です。" +
+        "画像に表示されている商品名と、その横または近くにある数量(点数・個数)をすべてペアで読み取ってください。" +
+        "リストが長い場合も省略せず、写っている行はすべて出力してください。" +
+        "出力は次のJSON形式のみとし、前置き・説明文・Markdownのコードブロック(```)は一切付けないでください。\n" +
+        '{"products": [{"name": "商品名", "qty": 数値}]}\n' +
+        "・数量が0または読み取れない商品は出力しなくて構いません。\n" +
+        "・商品名は画像に表示されている表記のまま使ってください。\n" +
+        "・「卵」「ドリンク」のようなカテゴリ見出し行(太字でカテゴリ合計が表示されている行)は含めないでください。個別の商品名の行のみを対象にしてください。\n" +
+        "・「未設定」など具体的な商品名になっていない行は除外してください。";
+
+      let response;
+      try {
+        response = await fetch("https://api.anthropic.com/v1/messages", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "x-api-key": apiKey.trim(),
+            "anthropic-version": "2023-06-01",
+            "anthropic-dangerous-direct-browser-access": "true",
+          },
+          body: JSON.stringify({
+            model: "claude-sonnet-4-6",
+            max_tokens: 4000,
+            messages: [
+              {
+                role: "user",
+                content: [
+                  {
+                    type: "image",
+                    source: { type: "base64", media_type: mediaType, data: base64 },
+                  },
+                  { type: "text", text: promptText },
+                ],
+              },
+            ],
+          }),
+        });
+      } catch (netErr) {
+        throw new Error("通信エラー: " + (netErr && netErr.message ? netErr.message : "接続できません"));
+      }
+
+      if (!response.ok) {
+        let bodyText = "";
+        try {
+          bodyText = await response.text();
+        } catch (e) {
+          bodyText = "";
+        }
+        throw new Error(`APIエラー(${response.status}) ${bodyText.slice(0, 150)}`);
+      }
+
+      const data = await response.json();
+      if (data.error) {
+        throw new Error(data.error.message || "APIエラー");
+      }
+      const textBlock = (data.content || []).find((b) => b.type === "text");
+      if (!textBlock || !textBlock.text) throw new Error("応答が空でした");
+
+      const raw = textBlock.text.trim();
+      const jsonMatch = raw.match(/\{[\s\S]*\}/);
+      if (!jsonMatch) throw new Error("JSON形式の応答が見つかりませんでした: " + raw.slice(0, 200));
+      const parsed = JSON.parse(jsonMatch[0]);
+
+      const filled = [];
+
+      if (Array.isArray(parsed.products) && parsed.products.length > 0) {
+        setProducts(
+          parsed.products
+            .filter((p) => p && p.name)
+            .map((p) => ({
+              name: String(p.name),
+              qty: p.qty !== null && p.qty !== undefined ? String(p.qty) : "",
+            }))
+        );
+        markDirty();
+        filled.push(`商品点数(${parsed.products.length}件)`);
+      }
+
+      if (filled.length === 0) {
+        setOcrError("画像から数値を読み取れませんでした。もう一度別の写真で試してください。");
+      } else {
+        setOcrNotice(`自動入力しました: ${filled.join(" / ")}(内容を確認してください)`);
+      }
+    } catch (err) {
+      setOcrError(
+        "読み取りに失敗しました" + (err && err.message ? `(${err.message})` : "") + "。写真を変えて再度お試しください。"
+      );
+    } finally {
+      setOcrLoading("");
+    }
+  };
+
+  // load state on mount
+  useEffect(() => {
+    (async () => {
+      try {
+        let state = null;
+        try {
+          const r = await storageGet("app-state");
+          state = r ? JSON.parse(r.value) : null;
+        } catch (e) {
+          state = null;
+        }
+
+        if (state) {
+          setPrevRegisterCash(String(state.lastRegisterCash ?? ""));
+          setCumulativeCounts(state.cumulativeCounts ?? {});
+        }
+
+        // if today's report already exists, load it (so refresh doesn't lose work)
+        try {
+          const existing = await storageGet(`report:${date}`);
+          if (existing) {
+            const rep = JSON.parse(existing.value);
+            setStaffName(rep.staffName ?? "");
+            setCardSales(String(rep.cardSales ?? ""));
+            setGrossProfit(String(rep.grossProfit ?? ""));
+            setCashSales(String(rep.cashSales ?? ""));
+            setPrevRegisterCash(String(rep.prevRegisterCash ?? ""));
+            setCounts(rep.counts ?? emptyCounts());
+            setProducts(rep.products ?? [{ name: "だし巻き卵サンド", qty: "" }]);
+            setHasSavedToday(true);
+          }
+        } catch (e) {
+          // no existing report for today, that's fine
+        }
+      } catch (e) {
+        setError("データの読み込みに失敗しました。");
+      } finally {
+        setLoading(false);
+      }
+    })();
+  }, [date]);
+
+  // 過去分のコーヒー・牛乳データを取得(加重平均用)
+  useEffect(() => {
+    (async () => {
+      const items = [];
+      for (let i = 1; i < AVG_WINDOW_DAYS; i++) {
+        const ds = dateStrDaysAgo(i);
+        try {
+          const r = await storageGet(`report:${ds}`);
+          if (r) {
+            const rep = JSON.parse(r.value);
+            const prods = rep.products || [];
+            const findQty = (name) => {
+              const found = prods.find((p) => (p.name || "").trim() === name);
+              return found ? Number(found.qty) || 0 : 0;
+            };
+            const breadSlices = BREAD_INGREDIENT_PRODUCTS.reduce(
+              (sum, name) => sum + findQty(name),
+              0
+            );
+            items.push({
+              date: ds,
+              daysAgo: i,
+              isWeekend: isWeekendOrHoliday(ds),
+              コーヒー: findQty("コーヒー"),
+              牛乳: findQty("牛乳"),
+              食パン: breadSlices,
+            });
+          }
+        } catch (e) {
+          // その日の記録なし
+        }
+      }
+      setTrackedHistory(items);
+    })();
+  }, [date]);
+
+  // 当月の過去日分の売上合計を取得(月次累計売上用)
+  useEffect(() => {
+    (async () => {
+      const todayObj = new Date(date + "T00:00:00");
+      const dayOfMonth = todayObj.getDate(); // 今日が何日か(1なら過去日なし)
+      let total = 0;
+      let count = 0;
+      for (let i = 1; i < dayOfMonth; i++) {
+        const ds = dateStrDaysAgo(i);
+        try {
+          const r = await storageGet(`report:${ds}`);
+          if (r) {
+            const rep = JSON.parse(r.value);
+            total += Number(rep.totalSales) || 0;
+            count += 1;
+          }
+        } catch (e) {
+          // その日の記録なし
+        }
+      }
+      setMonthlyPastTotal(total);
+      setMonthlyPastDays(count);
+    })();
+  }, [date]);
+
+  const num = (v) => (v === "" || v === null || isNaN(v) ? 0 : Number(v));
+
+  const findProductQty = (name) =>
+    num(products.find((p) => (p.name || "").trim() === name)?.qty);
+
+  const todayTrackedEntry = {
+    date,
+    daysAgo: 0,
+    isWeekend: isWeekendOrHoliday(date),
+    コーヒー: findProductQty("コーヒー"),
+    牛乳: findProductQty("牛乳"),
+    食パン: BREAD_INGREDIENT_PRODUCTS.reduce((sum, name) => sum + findProductQty(name), 0),
+  };
+  const allTrackedEntries = [todayTrackedEntry, ...trackedHistory];
+
+  const trackedAverages = TRACKED_PRODUCTS.map((name) => ({
+    name,
+    weekday: weightedAverage(allTrackedEntries, name, false),
+    weekend: weightedAverage(allTrackedEntries, name, true),
+  }));
+
+  const breadSlicesWeekdayAvg = weightedAverage(allTrackedEntries, "食パン", false);
+  const breadSlicesWeekendAvg = weightedAverage(allTrackedEntries, "食パン", true);
+  const breadLoavesWeekdayAvg =
+    breadSlicesWeekdayAvg === null ? null : breadSlicesWeekdayAvg / SLICES_PER_LOAF;
+  const breadLoavesWeekendAvg =
+    breadSlicesWeekendAvg === null ? null : breadSlicesWeekendAvg / SLICES_PER_LOAF;
+
+  const totalSales = num(cardSales) + num(cashSales);
+  const monthlyTotalWithToday = monthlyPastTotal + totalSales;
+  const currentMonthLabel = `${new Date(date + "T00:00:00").getMonth() + 1}月`;
+
+  let envelopeToday = 0;
+  let registerTotal = 0;
+  const allCounts = Object.fromEntries(DENOMS.map((d) => [d.key, num(counts[d.key])]));
+  const denomBreakdown = DENOMS.map((d) => {
+    const c = num(counts[d.key]);
+    const target = d.keep(c, allCounts);
+    const keep = Math.min(c, target) >= 0 ? Math.min(c, target) : 0;
+    const toEnvelope = c - keep;
+    envelopeToday += toEnvelope * d.value;
+    registerTotal += keep * d.value;
+    return { ...d, count: c, keep, toEnvelope };
+  });
+
+  const expected = num(cashSales) + num(prevRegisterCash);
+  const actual = envelopeToday + registerTotal;
+  const discrepancy = actual - expected;
+
+  const newCumulativeCounts = Object.fromEntries(
+    DENOMS.map((d) => {
+      const found = denomBreakdown.find((x) => x.key === d.key);
+      const prevCount = cumulativeCounts[d.key] ?? 0;
+      return [d.key, prevCount + (found ? found.toEnvelope : 0)];
+    })
+  );
+  const cumulativeTotal = DENOMS.reduce(
+    (sum, d) => sum + (cumulativeCounts[d.key] ?? 0) * d.value,
+    0
+  );
+  const newCumulativeTotal = DENOMS.reduce(
+    (sum, d) => sum + (newCumulativeCounts[d.key] ?? 0) * d.value,
+    0
+  );
+
+  const updateCount = (key, val) => {
+    if (val !== "" && !/^\d*$/.test(val)) return;
+    setCounts((prev) => ({ ...prev, [key]: val }));
+    markDirty();
+  };
+
+  const updateProduct = (idx, field, val) => {
+    setProducts((prev) =>
+      prev.map((p, i) => (i === idx ? { ...p, [field]: val } : p))
+    );
+    markDirty();
+  };
+  const addProduct = () => {
+    setProducts((prev) => [...prev, { name: "", qty: "" }]);
+    markDirty();
+  };
+  const removeProduct = (idx) => {
+    setProducts((prev) => prev.filter((_, i) => i !== idx));
+    markDirty();
+  };
+
+  const save = useCallback(
+    async (resetEnvelope) => {
+      setSaving(true);
+      setError("");
+      try {
+        const finalCounts = resetEnvelope
+          ? Object.fromEntries(DENOMS.map((d) => [d.key, 0]))
+          : newCumulativeCounts;
+        const finalTotal = resetEnvelope ? 0 : newCumulativeTotal;
+
+        const report = {
+          date,
+          staffName,
+          cardSales: num(cardSales),
+          grossProfit: num(grossProfit),
+          cashSales: num(cashSales),
+          totalSales,
+          prevRegisterCash: num(prevRegisterCash),
+          envelopeToday,
+          registerTotal,
+          discrepancy,
+          cumulativeEnvelope: finalTotal,
+          counts,
+          products,
+          savedAt: new Date().toISOString(),
+        };
+        await storageSet(`report:${date}`, JSON.stringify(report));
+
+        const state = {
+          lastDate: date,
+          lastRegisterCash: registerTotal,
+          cumulativeCounts: finalCounts,
+        };
+        await storageSet("app-state", JSON.stringify(state));
+        setCumulativeCounts(finalCounts);
+        setSavedFlash(true);
+        setHasSavedToday(true);
+        setTimeout(() => setSavedFlash(false), 2000);
+
+        // Googleスプレッドシートへ送信(失敗しても保存自体は成功扱いにする)
+        if (GAS_SHEET_WEBAPP_URL && GAS_SHEET_WEBAPP_URL !== "PASTE_YOUR_DEPLOYMENT_URL_HERE") {
+          setSheetSyncStatus("sending");
+          setSheetSyncError("");
+          fetch(GAS_SHEET_WEBAPP_URL, {
+            method: "POST",
+            headers: { "Content-Type": "text/plain;charset=utf-8" },
+            body: JSON.stringify({
+              action: "syncSheet",
+              date,
+              totalSales,
+              grossProfit: num(grossProfit),
+            }),
+          })
+            .then(async (res) => {
+              const rawText = await res.text();
+              if (!res.ok) {
+                throw new Error(`HTTPエラー(${res.status}) ${rawText.slice(0, 150)}`);
+              }
+              let json;
+              try {
+                json = JSON.parse(rawText);
+              } catch (parseErr) {
+                throw new Error(
+                  "応答がJSONではありません(ログイン画面が返っている可能性があります): " +
+                    rawText.slice(0, 150)
+                );
+              }
+              if (!json || !json.ok) {
+                throw new Error((json && json.error) || "GAS側でエラーが返されました");
+              }
+              setSheetSyncStatus("success");
+              setTimeout(() => setSheetSyncStatus(""), 3000);
+            })
+            .catch((err) => {
+              setSheetSyncStatus("error");
+              setSheetSyncError(err && err.message ? err.message : "不明なエラー");
+            });
+        }
+      } catch (e) {
+        setError("保存に失敗しました。もう一度お試しください。");
+      } finally {
+        setSaving(false);
+      }
+    },
+    [date, staffName, cardSales, cashSales, grossProfit, prevRegisterCash, envelopeToday, registerTotal, discrepancy, newCumulativeCounts, newCumulativeTotal, counts, products]
+  );
+
+  const [copyFlash, setCopyFlash] = useState(false);
+
+  const buildReportText = () => {
+    const lines = [];
+    lines.push(`${fmtDateJp(date)}`);
+    lines.push("売上報告");
+    if (staffName.trim()) lines.push(`担当:${staffName.trim()}`);
+    lines.push("");
+    lines.push(`総売上 ${YEN(totalSales)}`);
+    lines.push(`粗利総額 ${YEN(num(grossProfit))}`);
+    lines.push(`（内訳：クレカ${YEN(num(cardSales))}／現金 ${YEN(num(cashSales))}）`);
+    lines.push("");
+    lines.push(`${currentMonthLabel}累計売上(本日分込み)`);
+    lines.push(YEN(monthlyTotalWithToday));
+    lines.push("");
+    lines.push("昨日レジ残り金");
+    lines.push(YEN(num(prevRegisterCash)));
+    lines.push("");
+    lines.push("本日売上封筒金");
+    lines.push(YEN(envelopeToday));
+    const envelopeTodayLines = denomBreakdown.filter((d) => d.toEnvelope > 0);
+    if (envelopeTodayLines.length > 0) {
+      lines.push("内訳");
+      envelopeTodayLines.forEach((d) => lines.push(`${d.label} ${d.toEnvelope}枚`));
+    }
+    lines.push("");
+    lines.push("本日レジ残り金合計");
+    lines.push(YEN(registerTotal));
+    const keptLines = denomBreakdown.filter((d) => d.keep > 0);
+    if (keptLines.length > 0) {
+      lines.push("内訳");
+      keptLines.forEach((d) => lines.push(`${d.label} ${d.keep}枚`));
+    }
+    lines.push("");
+    lines.push("⸻");
+    lines.push("レジ金差異");
+    lines.push(YEN(discrepancy));
+    lines.push("");
+    lines.push("累計売上封筒金");
+    lines.push(YEN(newCumulativeTotal));
+    const cumulativeLines = DENOMS.filter(
+      (d) => d.key !== "100" && d.key !== "50" && (newCumulativeCounts[d.key] ?? 0) > 0
+    );
+    if (cumulativeLines.length > 0) {
+      lines.push("内訳");
+      cumulativeLines.forEach((d) =>
+        lines.push(`${d.label} ${newCumulativeCounts[d.key] ?? 0}枚`)
+      );
+    }
+    lines.push("");
+    lines.push("商品点数");
+    const soldProducts = products.filter((p) => p.name.trim() && num(p.qty) > 0);
+    if (soldProducts.length > 0) {
+      soldProducts.forEach((p) => lines.push(`${p.name.trim()} ${num(p.qty)}個`));
+    } else {
+      lines.push("(なし)");
+    }
+    return lines.join("\n");
+  };
+
+  const copyReportText = async () => {
+    const text = buildReportText();
+    try {
+      await navigator.clipboard.writeText(text);
+      setCopyFlash(true);
+      setTimeout(() => setCopyFlash(false), 2000);
+    } catch (e) {
+      try {
+        const ta = document.createElement("textarea");
+        ta.value = text;
+        ta.style.position = "fixed";
+        ta.style.opacity = "0";
+        document.body.appendChild(ta);
+        ta.focus();
+        ta.select();
+        document.execCommand("copy");
+        document.body.removeChild(ta);
+        setCopyFlash(true);
+        setTimeout(() => setCopyFlash(false), 2000);
+      } catch (e2) {
+        setError("コピーに失敗しました。テキストを長押しして手動でコピーしてください。");
+      }
+    }
+  };
+
+  const copyToClipboard = async (text) => {
+    try {
+      await navigator.clipboard.writeText(text);
+      return true;
+    } catch (e) {
+      try {
+        const ta = document.createElement("textarea");
+        ta.value = text;
+        ta.style.position = "fixed";
+        ta.style.opacity = "0";
+        document.body.appendChild(ta);
+        ta.focus();
+        ta.select();
+        document.execCommand("copy");
+        document.body.removeChild(ta);
+        return true;
+      } catch (e2) {
+        return false;
+      }
+    }
+  };
+
+  const buildMigrationPayload = async () => {
+    const historyReports = [];
+    for (let i = 1; i <= MIGRATION_WINDOW_DAYS; i++) {
+      const ds = dateStrDaysAgo(i);
+      try {
+        const r = await storageGet(`report:${ds}`);
+        if (r) historyReports.push({ date: ds, report: JSON.parse(r.value) });
+      } catch (e) {
+        // その日の記録なし
+      }
+    }
+    let appState = null;
+    try {
+      const r = await storageGet("app-state");
+      if (r) appState = JSON.parse(r.value);
+    } catch (e) {
+      appState = null;
+    }
+    return {
+      migrationVersion: 2,
+      exportedAt: new Date().toISOString(),
+      windowDays: MIGRATION_WINDOW_DAYS,
+      today: {
+        date,
+        staffName,
+        cardSales,
+        cashSales,
+        grossProfit,
+        prevRegisterCash,
+        counts,
+        products,
+        cumulativeCounts,
+      },
+      appState,
+      historyReports,
+    };
+  };
+
+  const exportMigrationData = async () => {
+    setMigrationError("");
+    setMigrationNotice("");
+    setMigrationBusy(true);
+    try {
+      const payload = await buildMigrationPayload();
+      const text = JSON.stringify(payload);
+      const ok = await copyToClipboard(text);
+      if (ok) {
+        setExportFlash(true);
+        setMigrationNotice(`過去${payload.historyReports.length}日分＋本日分のデータをコピーしました。`);
+        setTimeout(() => setExportFlash(false), 2500);
+      } else {
+        setMigrationError("コピーに失敗しました。下のテキストを長押しして手動でコピーしてください。");
+        setImportText(text);
+      }
+    } catch (e) {
+      setMigrationError("エクスポートに失敗しました。もう一度お試しください。");
+    } finally {
+      setMigrationBusy(false);
+    }
+  };
+
+  const importMigrationData = async () => {
+    setMigrationError("");
+    setMigrationNotice("");
+    setMigrationBusy(true);
+    try {
+      const data = JSON.parse(importText.trim());
+
+      // 新形式(migrationVersion 2): 過去1ヶ月分の履歴を含む
+      if (data.migrationVersion === 2 && data.today) {
+        const t = data.today;
+        if (typeof t.staffName === "string") setStaffName(t.staffName);
+        if (typeof t.cardSales === "string") setCardSales(t.cardSales);
+        if (typeof t.grossProfit === "string") setGrossProfit(t.grossProfit);
+        if (typeof t.cashSales === "string") setCashSales(t.cashSales);
+        if (typeof t.prevRegisterCash === "string") setPrevRegisterCash(t.prevRegisterCash);
+        if (t.counts && typeof t.counts === "object") setCounts({ ...emptyCounts(), ...t.counts });
+        if (Array.isArray(t.products)) setProducts(t.products);
+        if (t.cumulativeCounts && typeof t.cumulativeCounts === "object") {
+          setCumulativeCounts(t.cumulativeCounts);
+        }
+
+        let restored = 0;
+        if (Array.isArray(data.historyReports)) {
+          for (const item of data.historyReports) {
+            try {
+              await storageSet(`report:${item.date}`, JSON.stringify(item.report));
+              restored += 1;
+            } catch (e) {
+              // 個別の保存失敗は無視して続行
+            }
+          }
+        }
+        if (data.appState) {
+          try {
+            await storageSet("app-state", JSON.stringify(data.appState));
+          } catch (e) {
+            // 失敗しても致命的ではない
+          }
+        }
+
+        // 加重平均・月次集計を最新の状態に再取得
+        const rerun = [];
+        for (let i = 1; i < AVG_WINDOW_DAYS; i++) {
+          const ds = dateStrDaysAgo(i);
+          try {
+            const r = await storageGet(`report:${ds}`);
+            if (r) {
+              const rep = JSON.parse(r.value);
+              const prods = rep.products || [];
+              const findQty = (name) => {
+                const found = prods.find((p) => (p.name || "").trim() === name);
+                return found ? Number(found.qty) || 0 : 0;
+              };
+              rerun.push({
+                date: ds,
+                daysAgo: i,
+                isWeekend: isWeekendOrHoliday(ds),
+                コーヒー: findQty("コーヒー"),
+                牛乳: findQty("牛乳"),
+                食パン: BREAD_INGREDIENT_PRODUCTS.reduce((s, n) => s + findQty(n), 0),
+              });
+            }
+          } catch (e) {
+            // なし
+          }
+        }
+        setTrackedHistory(rerun);
+
+        const todayObj = new Date(date + "T00:00:00");
+        const dayOfMonth = todayObj.getDate();
+        let mTotal = 0;
+        let mCount = 0;
+        for (let i = 1; i < dayOfMonth; i++) {
+          const ds = dateStrDaysAgo(i);
+          try {
+            const r = await storageGet(`report:${ds}`);
+            if (r) {
+              const rep = JSON.parse(r.value);
+              mTotal += Number(rep.totalSales) || 0;
+              mCount += 1;
+            }
+          } catch (e) {
+            // なし
+          }
+        }
+        setMonthlyPastTotal(mTotal);
+        setMonthlyPastDays(mCount);
+
+        setMigrationNotice(
+          `読み込みました(過去${restored}日分＋本日分)。内容を確認して「本日の報告を保存」を押すと確定します。`
+        );
+        setImportText("");
+      } else {
+        // 旧形式(migrationVersion 1): 本日分のみ
+        if (typeof data.staffName === "string") setStaffName(data.staffName);
+        if (typeof data.cardSales === "string") setCardSales(data.cardSales);
+        if (typeof data.grossProfit === "string") setGrossProfit(data.grossProfit);
+        if (typeof data.cashSales === "string") setCashSales(data.cashSales);
+        if (typeof data.prevRegisterCash === "string") setPrevRegisterCash(data.prevRegisterCash);
+        if (data.counts && typeof data.counts === "object") setCounts({ ...emptyCounts(), ...data.counts });
+        if (Array.isArray(data.products)) setProducts(data.products);
+        if (data.cumulativeCounts && typeof data.cumulativeCounts === "object") {
+          setCumulativeCounts(data.cumulativeCounts);
+        }
+        if (Array.isArray(data.trackedHistory)) setTrackedHistory(data.trackedHistory);
+        setMigrationNotice("読み込みました(本日分のみ・旧形式)。内容を確認して保存してください。");
+        setImportText("");
+      }
+    } catch (e) {
+      setMigrationError("読み込みに失敗しました。コピーしたテキストをそのまま貼り付けているか確認してください。");
+    } finally {
+      setMigrationBusy(false);
+    }
+  };
+
+  if (loading) {
+    return (
+      <div style={styles.page}>
+        <div style={styles.loading}>読み込み中...</div>
+      </div>
+    );
+  }
+
+  return (
+    <div style={styles.page}>
+      <div style={styles.container}>
+        <header style={styles.header}>
+          <div style={styles.headerTop}>
+            <span style={styles.eyebrow}>DAILY CASH REPORT</span>
+            <span style={styles.dateBadge}>{fmtDateJp(date)}</span>
+          </div>
+          <h1 style={styles.title}>売上報告</h1>
+        </header>
+
+        {error && <div style={styles.errorBox}>{error}</div>}
+
+        <Section title="Claude APIキー" note="商品点数の写真読み取り(OCR)に使用">
+          {apiKey ? (
+            <div>
+              <p style={styles.hint}>APIキーは設定済みです(●●●●で保存されています)。</p>
+              <button
+                style={styles.migrationToggle}
+                onClick={() => {
+                  setApiKey("");
+                  try {
+                    localStorage.removeItem("claude_api_key");
+                  } catch (e) {}
+                }}
+              >
+                キーを削除して入力し直す
+              </button>
+            </div>
+          ) : (
+            <div>
+              <p style={styles.hint}>
+                console.anthropic.com で発行したAPIキーを入力してください。一度保存すればこの端末では次回以降入力不要です。
+              </p>
+              <input
+                style={styles.staffInput}
+                type="password"
+                placeholder="sk-ant-..."
+                value={apiKeyDraft}
+                onChange={(e) => setApiKeyDraft(e.target.value)}
+              />
+              <button
+                style={{ ...styles.copyButton, marginTop: 8 }}
+                onClick={() => {
+                  if (!apiKeyDraft.trim()) return;
+                  setApiKey(apiKeyDraft.trim());
+                  try {
+                    localStorage.setItem("claude_api_key", apiKeyDraft.trim());
+                  } catch (e) {}
+                  setApiKeyDraft("");
+                  setApiKeySaved(true);
+                  setTimeout(() => setApiKeySaved(false), 2000);
+                }}
+              >
+                {apiKeySaved ? "✓ 保存しました" : "保存"}
+              </button>
+            </div>
+          )}
+        </Section>
+
+        <Section title="データ移行" note="バックアップ・別端末への引き継ぎ用(最大過去1ヶ月分)">
+          <button
+            style={styles.migrationToggle}
+            onClick={() => setShowMigration((v) => !v)}
+          >
+            {showMigration ? "閉じる" : "開く"}
+          </button>
+          {showMigration && (
+            <div style={{ marginTop: 10 }}>
+              <p style={styles.hint}>
+                アプリを作り直した時、今のデータ(過去最大{MIGRATION_WINDOW_DAYS}日分＋本日分)をコピーして新しい方に貼り付ければ、手入力し直さずに引き継げます。
+              </p>
+              <button style={styles.copyButton} onClick={exportMigrationData} disabled={migrationBusy}>
+                {migrationBusy ? "処理中..." : exportFlash ? "✓ コピーしました" : "① 今のデータをコピー(エクスポート)"}
+              </button>
+              <p style={{ ...styles.hint, marginTop: 14 }}>
+                新しいアプリ側では、コピーした内容を下に貼り付けて読み込んでください。
+              </p>
+              <textarea
+                style={styles.migrationTextarea}
+                placeholder="ここにコピーしたデータを貼り付け"
+                value={importText}
+                onChange={(e) => setImportText(e.target.value)}
+              />
+              <button
+                style={styles.copyButton}
+                onClick={importMigrationData}
+                disabled={!importText.trim() || migrationBusy}
+              >
+                {migrationBusy ? "読み込み中..." : "② 貼り付けた内容を読み込む(インポート)"}
+              </button>
+              {migrationNotice && <p style={styles.ocrNotice}>{migrationNotice}</p>}
+              {migrationError && <p style={styles.hintWarn}>{migrationError}</p>}
+            </div>
+          )}
+        </Section>
+
+        <Section title="担当者">
+          <input
+            style={styles.staffInput}
+            placeholder="氏名を入力"
+            value={staffName}
+            onChange={(e) => {
+              setStaffName(e.target.value);
+              markDirty();
+            }}
+          />
+        </Section>
+
+        {/* 売上入力 */}
+        <Section title="売上" note="エアレジのデータを見ながら入力してください">
+          <FieldRow label="クレカ売上">
+            <YenInput
+              value={cardSales}
+              onChange={(v) => {
+                setCardSales(v);
+                markDirty();
+              }}
+            />
+          </FieldRow>
+          <FieldRow label="現金売上">
+            <YenInput
+              value={cashSales}
+              onChange={(v) => {
+                setCashSales(v);
+                markDirty();
+              }}
+            />
+          </FieldRow>
+          <TotalRow label="総売上" value={totalSales} highlight />
+          <FieldRow label="粗利総額">
+            <YenInput
+              value={grossProfit}
+              onChange={(v) => {
+                setGrossProfit(v);
+                markDirty();
+              }}
+            />
+          </FieldRow>
+        </Section>
+
+        {/* 当月累計売上 */}
+        <Section title={`${currentMonthLabel}累計売上`} note="本日分を含む">
+          <TotalRow label={`${currentMonthLabel}1日〜前日までの合計`} value={monthlyPastTotal} />
+          <TotalRow label="本日分" value={totalSales} />
+          <TotalRow label={`${currentMonthLabel}累計(本日分込み)`} value={monthlyTotalWithToday} highlight />
+          <p style={styles.hint}>
+            集計対象:今月の記録がある{monthlyPastDays}日分＋本日
+          </p>
+        </Section>
+
+        {/* レジ残り金 */}
+        <Section title="レジ残り金">
+          <FieldRow label="昨日レジ残り金">
+            <YenInput
+              value={prevRegisterCash}
+              onChange={(v) => {
+                setPrevRegisterCash(v);
+                markDirty();
+              }}
+            />
+          </FieldRow>
+          <p style={styles.hint}>
+            前回保存時のレジ残り金が自動で入っています。違う場合は修正してください。
+          </p>
+        </Section>
+
+        {/* 紙幣・硬貨枚数 */}
+        <Section title="本日の紙幣・硬貨枚数">
+          <div style={styles.denomGrid}>
+            {DENOMS.map((d) => (
+              <div key={d.key} style={styles.denomRow}>
+                <span style={styles.denomLabel}>{d.label}</span>
+                <input
+                  inputMode="numeric"
+                  placeholder="0"
+                  value={counts[d.key]}
+                  onChange={(e) => updateCount(d.key, e.target.value)}
+                  style={styles.denomInput}
+                />
+                <span style={styles.denomUnit}>枚</span>
+              </div>
+            ))}
+          </div>
+          <div style={styles.denomResultGrid}>
+            <TotalRow label="本日売上封筒金" value={envelopeToday} />
+            <TotalRow label="本日レジ残り金合計" value={registerTotal} />
+          </div>
+          <details style={styles.details}>
+            <summary style={styles.detailsSummary}>内訳を見る</summary>
+            <table style={styles.table}>
+              <thead>
+                <tr>
+                  <th style={styles.th}></th>
+                  <th style={styles.th}>枚数</th>
+                  <th style={styles.th}>レジに残す</th>
+                  <th style={styles.th}>封筒へ</th>
+                </tr>
+              </thead>
+              <tbody>
+                {denomBreakdown.map((d) => (
+                  <tr key={d.key}>
+                    <td style={styles.td}>{d.label}</td>
+                    <td style={styles.td}>{d.count}枚</td>
+                    <td style={styles.td}>{d.keep}枚</td>
+                    <td style={styles.td}>{d.toEnvelope}枚</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </details>
+        </Section>
+
+        {/* レジ金差異 */}
+        <Section title="レジ金差異">
+          <div style={styles.formulaBox}>
+            <span>現金売上 + 昨日レジ残り金</span>
+            <span style={styles.formulaEq}>=</span>
+            <span>売上封筒金 + レジ残り金合計</span>
+          </div>
+          <div style={styles.formulaValues}>
+            <span>{YEN(num(cashSales))} + {YEN(num(prevRegisterCash))} = {YEN(expected)}</span>
+            <span>{YEN(envelopeToday)} + {YEN(registerTotal)} = {YEN(actual)}</span>
+          </div>
+          <TotalRow
+            label="レジ金差異"
+            value={discrepancy}
+            highlight
+            tone={discrepancy === 0 ? "ok" : "warn"}
+          />
+          {discrepancy !== 0 && (
+            <p style={styles.hintWarn}>
+              {discrepancy > 0 ? "実際の金額が多い" : "実際の金額が不足"}状態です。数え直しをおすすめします。
+            </p>
+          )}
+        </Section>
+
+        {/* 累計売上封筒金 */}
+        <Section
+          title="累計売上封筒金"
+          note={isDepositDay(date) ? "本日は入金日(月・金)です" : undefined}
+        >
+          <TotalRow label="保存前の累計" value={cumulativeTotal} />
+          <TotalRow label="保存後の累計(本日分を加算)" value={newCumulativeTotal} highlight />
+          <details style={styles.details}>
+            <summary style={styles.detailsSummary}>紙幣・硬貨の内訳を見る</summary>
+            <table style={styles.table}>
+              <thead>
+                <tr>
+                  <th style={styles.th}></th>
+                  <th style={styles.th}>保存前</th>
+                  <th style={styles.th}>保存後</th>
+                </tr>
+              </thead>
+              <tbody>
+                {DENOMS.filter((d) => d.key !== "100" && d.key !== "50").map((d) => (
+                  <tr key={d.key}>
+                    <td style={styles.td}>{d.label}</td>
+                    <td style={styles.td}>{cumulativeCounts[d.key] ?? 0}枚</td>
+                    <td style={styles.td}>{newCumulativeCounts[d.key] ?? 0}枚</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </details>
+          {isDepositDay(date) && (
+            <button
+              style={styles.resetButton}
+              onClick={() => save(true)}
+              disabled={saving}
+            >
+              銀行入金完了 → 累計をリセットして保存
+            </button>
+          )}
+          <button
+            style={styles.resetButtonOutline}
+            onClick={() => {
+              if (window.confirm("累計売上封筒金をリセットします。よろしいですか？")) {
+                save(true);
+              }
+            }}
+            disabled={saving}
+          >
+            累計売上封筒金をリセット
+          </button>
+        </Section>
+
+        {/* 商品点数 */}
+        <Section title="商品点数">
+          <label style={styles.photoButton}>
+            {ocrLoading === "products" ? "読み取り中..." : "📷 商品別売上画面の写真から自動入力"}
+            <input
+              type="file"
+              accept="image/*"
+              onChange={handlePhotoUpload}
+              disabled={!!ocrLoading}
+              style={{ display: "none" }}
+            />
+          </label>
+          {ocrNotice && <p style={styles.ocrNotice}>{ocrNotice}</p>}
+          {ocrError && <p style={styles.hintWarn}>{ocrError}</p>}
+          {products.map((p, idx) => (
+            <div key={idx} style={styles.productRow}>
+              <input
+                style={styles.productName}
+                placeholder="商品名"
+                value={p.name}
+                onChange={(e) => updateProduct(idx, "name", e.target.value)}
+              />
+              <input
+                style={styles.productQty}
+                inputMode="numeric"
+                placeholder="0"
+                value={p.qty}
+                onChange={(e) => {
+                  if (e.target.value === "" || /^\d*$/.test(e.target.value)) {
+                    updateProduct(idx, "qty", e.target.value);
+                  }
+                }}
+              />
+              <span style={styles.denomUnit}>個</span>
+              <button style={styles.removeBtn} onClick={() => removeProduct(idx)}>
+                ×
+              </button>
+            </div>
+          ))}
+          <button style={styles.addBtn} onClick={addProduct}>
+            + 商品を追加
+          </button>
+        </Section>
+
+        {/* コーヒー・牛乳 加重平均 */}
+        <Section
+          title="コーヒー・牛乳の平均本数"
+          note="直近2週間・新しい日ほど重視"
+        >
+          <div style={styles.avgGrid}>
+            {trackedAverages.map((t) => (
+              <React.Fragment key={t.name}>
+                <div style={styles.avgCell}>
+                  <span style={styles.avgLabel}>{t.name}(平日)</span>
+                  <span style={styles.avgValue}>
+                    {t.weekday === null ? "―" : `${t.weekday.toFixed(1)}本`}
+                  </span>
+                </div>
+                <div style={styles.avgCell}>
+                  <span style={styles.avgLabel}>{t.name}(土日祝)</span>
+                  <span style={styles.avgValue}>
+                    {t.weekend === null ? "―" : `${t.weekend.toFixed(1)}本`}
+                  </span>
+                </div>
+              </React.Fragment>
+            ))}
+          </div>
+          <p style={styles.hint}>
+            集計対象:{allTrackedEntries.length}日分(本日の入力を含む)。記録がない日はカウントされません。
+          </p>
+        </Section>
+
+        {/* 食パン使用量(合算) */}
+        <Section
+          title="食パン使用量"
+          note="卵サンド・サーモン・牛しぐれ・うなぎ・明太子の合算/直近2週間"
+        >
+          <div style={styles.avgGrid}>
+            <div style={styles.avgCell}>
+              <span style={styles.avgLabel}>使用枚数(平日)</span>
+              <span style={styles.avgValue}>
+                {breadSlicesWeekdayAvg === null ? "―" : `${breadSlicesWeekdayAvg.toFixed(1)}枚`}
+              </span>
+            </div>
+            <div style={styles.avgCell}>
+              <span style={styles.avgLabel}>使用枚数(土日祝)</span>
+              <span style={styles.avgValue}>
+                {breadSlicesWeekendAvg === null ? "―" : `${breadSlicesWeekendAvg.toFixed(1)}枚`}
+              </span>
+            </div>
+            <div style={styles.avgCell}>
+              <span style={styles.avgLabel}>使用本数(平日)</span>
+              <span style={styles.avgValue}>
+                {breadLoavesWeekdayAvg === null ? "―" : `${breadLoavesWeekdayAvg.toFixed(2)}本`}
+              </span>
+            </div>
+            <div style={styles.avgCell}>
+              <span style={styles.avgLabel}>使用本数(土日祝)</span>
+              <span style={styles.avgValue}>
+                {breadLoavesWeekendAvg === null ? "―" : `${breadLoavesWeekendAvg.toFixed(2)}本`}
+              </span>
+            </div>
+          </div>
+          <p style={styles.hint}>1本(食パン)＝{SLICES_PER_LOAF}枚換算</p>
+        </Section>
+
+        {/* LINE報告用テキスト */}
+        <Section title="LINE報告用テキスト" note="内容は入力に合わせて自動更新されます">
+          <pre style={styles.reportPreview}>{buildReportText()}</pre>
+          {!hasSavedToday && (
+            <p style={styles.hintWarn}>
+              先に「本日の報告を保存」を押してください。保存後にコピーできます。
+            </p>
+          )}
+          <button
+            style={{
+              ...styles.copyButton,
+              ...(hasSavedToday ? {} : styles.copyButtonDisabled),
+            }}
+            onClick={copyReportText}
+            disabled={!hasSavedToday}
+          >
+            {copyFlash ? "✓ コピーしました" : hasSavedToday ? "この内容をコピー" : "保存後にコピーできます"}
+          </button>
+        </Section>
+
+        <div style={styles.saveArea}>
+          <button style={styles.saveButton} onClick={() => save(false)} disabled={saving}>
+            {saving ? "保存中..." : "本日の報告を保存"}
+          </button>
+          {savedFlash && <span style={styles.savedFlash}>✓ 保存しました</span>}
+          {sheetSyncStatus === "sending" && (
+            <span style={styles.hint}>スプレッドシートに送信中...</span>
+          )}
+          {sheetSyncStatus === "success" && (
+            <span style={styles.savedFlash}>✓ スプレッドシートにも反映しました</span>
+          )}
+          {sheetSyncStatus === "error" && (
+            <span style={styles.hintWarn}>
+              スプレッドシートへの送信に失敗しました(アプリ側の保存は成功しています){sheetSyncError ? `: ${sheetSyncError}` : ""}
+            </span>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function Section({ title, note, children }) {
+  return (
+    <section style={styles.section}>
+      <div style={styles.sectionHead}>
+        <h2 style={styles.sectionTitle}>{title}</h2>
+        {note && <span style={styles.sectionNote}>{note}</span>}
+      </div>
+      {children}
+    </section>
+  );
+}
+
+function FieldRow({ label, children }) {
+  return (
+    <div style={styles.fieldRow}>
+      <label style={styles.fieldLabel}>{label}</label>
+      {children}
+    </div>
+  );
+}
+
+function YenInput({ value, onChange }) {
+  return (
+    <div style={styles.yenInputWrap}>
+      <span style={styles.yenSign}>¥</span>
+      <input
+        inputMode="numeric"
+        placeholder="0"
+        value={value}
+        onChange={(e) => {
+          if (e.target.value === "" || /^\d*$/.test(e.target.value)) {
+            onChange(e.target.value);
+          }
+        }}
+        style={styles.yenInput}
+      />
+    </div>
+  );
+}
+
+function TotalRow({ label, value, highlight, tone }) {
+  const color =
+    tone === "ok" ? "#2f6d4f" : tone === "warn" ? "#b3492f" : highlight ? "#1a1a1a" : "#444";
+  return (
+    <div style={{ ...styles.totalRow, ...(highlight ? styles.totalRowHighlight : {}) }}>
+      <span style={styles.totalLabel}>{label}</span>
+      <span style={{ ...styles.totalValue, color }}>{YEN(value)}</span>
+    </div>
+  );
+}
+
+const styles = {
+  page: {
+    minHeight: "100vh",
+    background: "#f6f3ee",
+    fontFamily:
+      "'Hiragino Sans', 'Yu Gothic', 'Noto Sans JP', system-ui, sans-serif",
+    padding: "0 0 48px",
+    color: "#1f1c18",
+  },
+  loading: { padding: 40, textAlign: "center", color: "#888" },
+  container: { maxWidth: 480, margin: "0 auto", padding: "0 16px" },
+  header: {
+    padding: "28px 4px 20px",
+    borderBottom: "2px solid #1f1c18",
+    marginBottom: 20,
+  },
+  headerTop: {
+    display: "flex",
+    justifyContent: "space-between",
+    alignItems: "center",
+    marginBottom: 6,
+  },
+  eyebrow: {
+    fontSize: 11,
+    letterSpacing: "0.12em",
+    color: "#8a6f4e",
+    fontWeight: 700,
+  },
+  dateBadge: {
+    fontSize: 13,
+    fontWeight: 700,
+    background: "#1f1c18",
+    color: "#f6f3ee",
+    padding: "3px 10px",
+    borderRadius: 3,
+  },
+  title: { fontSize: 26, fontWeight: 800, margin: 0, letterSpacing: "0.02em" },
+  errorBox: {
+    background: "#fbe2dc",
+    color: "#8c2f1b",
+    padding: "10px 14px",
+    borderRadius: 6,
+    marginBottom: 16,
+    fontSize: 14,
+  },
+  section: {
+    background: "#fffdf9",
+    border: "1px solid #e4ddd0",
+    borderRadius: 10,
+    padding: "16px 16px 18px",
+    marginBottom: 16,
+  },
+  sectionHead: {
+    display: "flex",
+    justifyContent: "space-between",
+    alignItems: "baseline",
+    marginBottom: 12,
+  },
+  sectionTitle: { fontSize: 15, fontWeight: 800, margin: 0 },
+  sectionNote: { fontSize: 11, color: "#a06b3b", fontWeight: 700 },
+  fieldRow: {
+    display: "flex",
+    justifyContent: "space-between",
+    alignItems: "center",
+    marginBottom: 10,
+  },
+  fieldLabel: { fontSize: 14, color: "#4a4438" },
+  staffInput: {
+    width: "100%",
+    border: "1px solid #d8cfbe",
+    borderRadius: 6,
+    padding: "9px 12px",
+    fontSize: 15,
+    outline: "none",
+    boxSizing: "border-box",
+  },
+  yenInputWrap: {
+    display: "flex",
+    alignItems: "center",
+    border: "1px solid #d8cfbe",
+    borderRadius: 6,
+    background: "#fff",
+    padding: "6px 10px",
+    minWidth: 130,
+  },
+  yenSign: { color: "#a08a63", fontSize: 14, marginRight: 4 },
+  yenInput: {
+    border: "none",
+    outline: "none",
+    fontSize: 15,
+    width: "100%",
+    textAlign: "right",
+    background: "transparent",
+  },
+  totalRow: {
+    display: "flex",
+    justifyContent: "space-between",
+    alignItems: "center",
+    padding: "8px 2px",
+    borderTop: "1px dashed #e4ddd0",
+    marginTop: 4,
+  },
+  totalRowHighlight: {
+    borderTop: "2px solid #1f1c18",
+    marginTop: 8,
+    paddingTop: 10,
+  },
+  totalLabel: { fontSize: 14, fontWeight: 700 },
+  totalValue: { fontSize: 17, fontWeight: 800 },
+  hint: { fontSize: 12, color: "#8a8272", marginTop: 4 },
+  avgGrid: {
+    display: "grid",
+    gridTemplateColumns: "1fr 1fr",
+    gap: 8,
+    marginBottom: 8,
+  },
+  avgCell: {
+    display: "flex",
+    flexDirection: "column",
+    gap: 2,
+    background: "#faf7f0",
+    border: "1px solid #e4ddd0",
+    borderRadius: 8,
+    padding: "8px 10px",
+  },
+  avgLabel: { fontSize: 11, color: "#8a8272" },
+  avgValue: { fontSize: 17, fontWeight: 800, color: "#1f1c18" },
+  hintWarn: { fontSize: 12, color: "#b3492f", marginTop: 6, fontWeight: 600 },
+  photoButton: {
+    display: "block",
+    textAlign: "center",
+    border: "1px dashed #a06b3b",
+    background: "#fbf3e7",
+    color: "#8a6f4e",
+    borderRadius: 8,
+    padding: "10px 12px",
+    fontSize: 13,
+    fontWeight: 700,
+    cursor: "pointer",
+    marginBottom: 12,
+  },
+  ocrNotice: {
+    fontSize: 12,
+    color: "#2f6d4f",
+    fontWeight: 600,
+    marginBottom: 10,
+  },
+  denomGrid: { display: "flex", flexDirection: "column", gap: 6 },
+  denomRow: { display: "flex", alignItems: "center", gap: 8 },
+  denomLabel: { fontSize: 13, width: 74, color: "#4a4438" },
+  denomInput: {
+    flex: 1,
+    border: "1px solid #d8cfbe",
+    borderRadius: 6,
+    padding: "6px 10px",
+    fontSize: 14,
+    textAlign: "right",
+    outline: "none",
+  },
+  denomUnit: { fontSize: 13, color: "#8a8272", width: 14 },
+  denomResultGrid: { marginTop: 12 },
+  details: { marginTop: 10 },
+  detailsSummary: {
+    fontSize: 12,
+    color: "#a06b3b",
+    cursor: "pointer",
+    fontWeight: 700,
+  },
+  table: { width: "100%", borderCollapse: "collapse", marginTop: 8 },
+  th: {
+    fontSize: 11,
+    color: "#8a8272",
+    textAlign: "right",
+    padding: "4px 2px",
+    fontWeight: 600,
+  },
+  td: { fontSize: 12, textAlign: "right", padding: "4px 2px", color: "#4a4438" },
+  formulaBox: {
+    display: "flex",
+    justifyContent: "space-between",
+    fontSize: 12,
+    color: "#8a8272",
+    marginBottom: 6,
+  },
+  formulaEq: { color: "#a08a63" },
+  formulaValues: {
+    display: "flex",
+    flexDirection: "column",
+    gap: 3,
+    fontSize: 13,
+    color: "#4a4438",
+    marginBottom: 8,
+  },
+  resetButton: {
+    width: "100%",
+    marginTop: 12,
+    padding: "10px 12px",
+    background: "#8a6f4e",
+    color: "#fff",
+    border: "none",
+    borderRadius: 8,
+    fontSize: 13,
+    fontWeight: 700,
+    cursor: "pointer",
+  },
+  resetButtonOutline: {
+    width: "100%",
+    marginTop: 10,
+    padding: "10px 12px",
+    background: "transparent",
+    color: "#b3492f",
+    border: "1px solid #b3492f",
+    borderRadius: 8,
+    fontSize: 13,
+    fontWeight: 700,
+    cursor: "pointer",
+  },
+  productRow: {
+    display: "flex",
+    alignItems: "center",
+    gap: 8,
+    marginBottom: 8,
+  },
+  productName: {
+    flex: 1,
+    border: "1px solid #d8cfbe",
+    borderRadius: 6,
+    padding: "7px 10px",
+    fontSize: 13,
+    outline: "none",
+  },
+  productQty: {
+    width: 56,
+    border: "1px solid #d8cfbe",
+    borderRadius: 6,
+    padding: "7px 8px",
+    fontSize: 13,
+    textAlign: "right",
+    outline: "none",
+  },
+  removeBtn: {
+    border: "none",
+    background: "transparent",
+    color: "#b3492f",
+    fontSize: 18,
+    cursor: "pointer",
+    lineHeight: 1,
+    padding: "0 4px",
+  },
+  addBtn: {
+    border: "1px dashed #c7bba0",
+    background: "transparent",
+    color: "#8a6f4e",
+    borderRadius: 6,
+    padding: "8px 12px",
+    fontSize: 13,
+    fontWeight: 700,
+    cursor: "pointer",
+    width: "100%",
+  },
+  saveArea: {
+    display: "flex",
+    flexDirection: "column",
+    alignItems: "center",
+    gap: 8,
+    marginTop: 8,
+  },
+  saveButton: {
+    width: "100%",
+    padding: "14px 12px",
+    background: "#1f1c18",
+    color: "#f6f3ee",
+    border: "none",
+    borderRadius: 10,
+    fontSize: 15,
+    fontWeight: 800,
+    cursor: "pointer",
+    letterSpacing: "0.02em",
+  },
+  savedFlash: { color: "#2f6d4f", fontSize: 13, fontWeight: 700 },
+  reportPreview: {
+    whiteSpace: "pre-wrap",
+    wordBreak: "break-word",
+    background: "#faf7f0",
+    border: "1px solid #e4ddd0",
+    borderRadius: 8,
+    padding: "12px 14px",
+    fontSize: 13,
+    lineHeight: 1.6,
+    color: "#2c2820",
+    fontFamily: "inherit",
+    margin: "0 0 10px",
+  },
+  copyButton: {
+    width: "100%",
+    padding: "12px 12px",
+    background: "#2f6d4f",
+    color: "#fff",
+    border: "none",
+    borderRadius: 8,
+    fontSize: 14,
+    fontWeight: 700,
+    cursor: "pointer",
+    marginTop: 8,
+  },
+  copyButtonDisabled: {
+    background: "#c9c2b3",
+    cursor: "not-allowed",
+  },
+  migrationToggle: {
+    width: "100%",
+    padding: "8px 12px",
+    background: "transparent",
+    color: "#8a6f4e",
+    border: "1px solid #a06b3b",
+    borderRadius: 8,
+    fontSize: 13,
+    fontWeight: 700,
+    cursor: "pointer",
+  },
+  migrationTextarea: {
+    width: "100%",
+    minHeight: 80,
+    border: "1px solid #d8cfbe",
+    borderRadius: 8,
+    padding: "10px 12px",
+    fontSize: 12,
+    fontFamily: "monospace",
+    boxSizing: "border-box",
+    marginTop: 4,
+  },
+};
+
+const root = ReactDOM.createRoot(document.getElementById('root'));
+root.render(<DailyCashReport />);
+</script>
+</body>
+</html>
