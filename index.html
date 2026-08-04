@@ -4,16 +4,56 @@
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
 <title>売上報告</title>
-<script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
-<script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
-<script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
 <style>
-  html, body { margin: 0; padding: 0; background: #f6f3ee; }
+  html, body { margin: 0; padding: 0; background: #f6f3ee; font-family: -apple-system, 'Hiragino Sans', sans-serif; }
   #root { min-height: 100vh; }
+  #boot-error {
+    display: none; padding: 24px 16px; max-width: 480px; margin: 40px auto;
+    background: #fbe2dc; color: #8c2f1b; border-radius: 10px; font-size: 14px; line-height: 1.7;
+    white-space: pre-wrap; word-break: break-word;
+  }
+  #boot-error h2 { margin: 0 0 10px; font-size: 16px; }
 </style>
 </head>
 <body>
 <div id="root"></div>
+<div id="boot-error"><h2>読み込みエラー</h2><div id="boot-error-text"></div></div>
+
+<script>
+// どこで何が失敗しても、この画面にエラー内容を表示する(真っ白のまま止まらないようにするため)
+window.addEventListener('error', function (e) {
+  var box = document.getElementById('boot-error');
+  var text = document.getElementById('boot-error-text');
+  if (box && text) {
+    box.style.display = 'block';
+    text.textContent += (e.message || String(e.error)) + '\n(' + (e.filename || '') + ':' + (e.lineno || '') + ')\n\n';
+  }
+});
+window.addEventListener('unhandledrejection', function (e) {
+  var box = document.getElementById('boot-error');
+  var text = document.getElementById('boot-error-text');
+  if (box && text) {
+    box.style.display = 'block';
+    text.textContent += '未処理のPromiseエラー: ' + (e.reason && e.reason.message ? e.reason.message : String(e.reason)) + '\n\n';
+  }
+});
+// 15秒経ってもアプリが何も表示していなければ、その旨を出す
+setTimeout(function () {
+  var root = document.getElementById('root');
+  if (root && root.innerHTML.trim() === '') {
+    var box = document.getElementById('boot-error');
+    var text = document.getElementById('boot-error-text');
+    if (box && text && text.textContent.trim() === '') {
+      box.style.display = 'block';
+      text.textContent = '15秒経っても画面が表示されませんでした。JavaScript自体は動いているが、何らかの理由で描画が止まっている可能性があります。';
+    }
+  }
+}, 15000);
+</script>
+
+<script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+<script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+<script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
 <script type="text/babel" data-presets="react">
 const { useState, useEffect, useCallback } = React;
 
@@ -1971,8 +2011,17 @@ class ErrorBoundary extends React.Component {
   }
 }
 
-const root = ReactDOM.createRoot(document.getElementById('root'));
-root.render(<ErrorBoundary><DailyCashReport /></ErrorBoundary>);
+try {
+  const root = ReactDOM.createRoot(document.getElementById('root'));
+  root.render(<ErrorBoundary><DailyCashReport /></ErrorBoundary>);
+} catch (e) {
+  var box = document.getElementById('boot-error');
+  var text = document.getElementById('boot-error-text');
+  if (box && text) {
+    box.style.display = 'block';
+    text.textContent += 'renderエラー: ' + (e && e.message ? e.message : String(e));
+  }
+}
 </script>
 </body>
 </html>
