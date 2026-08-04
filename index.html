@@ -69,6 +69,12 @@ function dateStrDaysAgo(n) {
   return toDateStr(d);
 }
 
+function offsetDateStr(baseDateStr, deltaDays) {
+  const d = new Date(baseDateStr + "T00:00:00");
+  d.setDate(d.getDate() + deltaDays);
+  return toDateStr(d);
+}
+
 function nthMonday(year, month, n) {
   const d = new Date(year, month - 1, 1);
   let count = 0;
@@ -201,7 +207,8 @@ function DailyCashReport() {
   const [savedFlash, setSavedFlash] = useState(false);
   const [error, setError] = useState("");
 
-  const [date] = useState(todayStr());
+  const [date, setDate] = useState(todayStr());
+  const isPastEdit = date !== todayStr();
   const [staffName, setStaffName] = useState("");
   const [cardSales, setCardSales] = useState("");
   const [cashSales, setCashSales] = useState("");
@@ -375,9 +382,20 @@ function DailyCashReport() {
     }
   };
 
-  // load state on mount
+  // load state whenever the selected date changes
   useEffect(() => {
     (async () => {
+      setLoading(true);
+      // 日付を切り替えた時、前の日のデータが残らないよう一旦リセット
+      setStaffName("");
+      setCardSales("");
+      setGrossProfit("");
+      setCashSales("");
+      setPrevRegisterCash("");
+      setCounts(emptyCounts());
+      setProducts([{ name: "だし巻き卵サンド", qty: "" }]);
+      setHasSavedToday(false);
+
       try {
         let state = null;
         try {
@@ -388,11 +406,27 @@ function DailyCashReport() {
         }
 
         if (state) {
-          setPrevRegisterCash(String(state.lastRegisterCash ?? ""));
           setCumulativeCounts(state.cumulativeCounts ?? {});
         }
 
-        // if today's report already exists, load it (so refresh doesn't lose work)
+        // 「昨日レジ残り金」の初期値: まず選択中の日の前日の保存済みレポートを探す。
+        // 無ければ(まだ記録がない最初の日など)、最新のapp-stateの値を仮に使う。
+        let prevSuggestion = "";
+        try {
+          const prevDayReport = await storageGet(`report:${offsetDateStr(date, -1)}`);
+          if (prevDayReport) {
+            const prevRep = JSON.parse(prevDayReport.value);
+            prevSuggestion = String(prevRep.registerTotal ?? "");
+          }
+        } catch (e) {
+          // なし
+        }
+        if (!prevSuggestion && state) {
+          prevSuggestion = String(state.lastRegisterCash ?? "");
+        }
+        setPrevRegisterCash(prevSuggestion);
+
+        // 選択中の日の報告が既に保存されていれば、その内容を読み込む
         try {
           const existing = await storageGet(`report:${date}`);
           if (existing) {
@@ -401,13 +435,13 @@ function DailyCashReport() {
             setCardSales(String(rep.cardSales ?? ""));
             setGrossProfit(String(rep.grossProfit ?? ""));
             setCashSales(String(rep.cashSales ?? ""));
-            setPrevRegisterCash(String(rep.prevRegisterCash ?? ""));
+            setPrevRegisterCash(String(rep.prevRegisterCash ?? prevSuggestion));
             setCounts(rep.counts ?? emptyCounts());
             setProducts(rep.products ?? [{ name: "だし巻き卵サンド", qty: "" }]);
             setHasSavedToday(true);
           }
         } catch (e) {
-          // no existing report for today, that's fine
+          // その日の報告はまだ無い、それでOK
         }
       } catch (e) {
         setError("データの読み込みに失敗しました。");
@@ -592,13 +626,16 @@ function DailyCashReport() {
         };
         await storageSet(`report:${date}`, JSON.stringify(report));
 
-        const state = {
-          lastDate: date,
-          lastRegisterCash: registerTotal,
-          cumulativeCounts: finalCounts,
-        };
-        await storageSet("app-state", JSON.stringify(state));
-        setCumulativeCounts(finalCounts);
+        if (!isPastEdit) {
+          // 過去日の修正では、進行中の累計・レジ残り金の引き継ぎ(app-state)は変更しない
+          const state = {
+            lastDate: date,
+            lastRegisterCash: registerTotal,
+            cumulativeCounts: finalCounts,
+          };
+          await storageSet("app-state", JSON.stringify(state));
+          setCumulativeCounts(finalCounts);
+        }
         setSavedFlash(true);
         setHasSavedToday(true);
         setTimeout(() => setSavedFlash(false), 2000);
@@ -648,7 +685,7 @@ function DailyCashReport() {
         setSaving(false);
       }
     },
-    [date, staffName, cardSales, cashSales, grossProfit, prevRegisterCash, envelopeToday, registerTotal, discrepancy, newCumulativeCounts, newCumulativeTotal, counts, products]
+    [date, isPastEdit, staffName, cardSales, cashSales, grossProfit, prevRegisterCash, envelopeToday, registerTotal, discrepancy, newCumulativeCounts, newCumulativeTotal, counts, products]
   );
 
   const [copyFlash, setCopyFlash] = useState(false);
@@ -953,6 +990,28 @@ function DailyCashReport() {
           <h1 style={styles.title}>売上報告</h1>
         </header>
 
+        <div style={styles.dateNav}>
+          <input
+            type="date"
+            style={styles.dateInput}
+            value={date}
+            max={todayStr()}
+            onChange={(e) => {
+              if (e.target.value) setDate(e.target.value);
+            }}
+          />
+          {isPastEdit && (
+            <button style={styles.todayBackButton} onClick={() => setDate(todayStr())}>
+              今日に戻る
+            </button>
+          )}
+        </div>
+        {isPastEdit && (
+          <div style={styles.pastEditBanner}>
+            過去日({fmtDateJp(date)})の報告を編集中です。この日の記録のみ保存され、進行中の累計売上封筒金・レジ残り金の引き継ぎには影響しません。
+          </div>
+        )}
+
         {error && <div style={styles.errorBox}>{error}</div>}
 
         <Section title="Claude APIキー" note="商品点数の写真読み取り(OCR)に使用">
@@ -1207,7 +1266,7 @@ function DailyCashReport() {
               </tbody>
             </table>
           </details>
-          {isDepositDay(date) && (
+          {!isPastEdit && isDepositDay(date) && (
             <button
               style={styles.resetButton}
               onClick={() => save(true)}
@@ -1216,17 +1275,19 @@ function DailyCashReport() {
               銀行入金完了 → 累計をリセットして保存
             </button>
           )}
-          <button
-            style={styles.resetButtonOutline}
-            onClick={() => {
-              if (window.confirm("累計売上封筒金をリセットします。よろしいですか？")) {
-                save(true);
-              }
-            }}
-            disabled={saving}
-          >
-            累計売上封筒金をリセット
-          </button>
+          {!isPastEdit && (
+            <button
+              style={styles.resetButtonOutline}
+              onClick={() => {
+                if (window.confirm("累計売上封筒金をリセットします。よろしいですか？")) {
+                  save(true);
+                }
+              }}
+              disabled={saving}
+            >
+              累計売上封筒金をリセット
+            </button>
+          )}
         </Section>
 
         {/* 商品点数 */}
@@ -1465,6 +1526,41 @@ const styles = {
     borderRadius: 3,
   },
   title: { fontSize: 26, fontWeight: 800, margin: 0, letterSpacing: "0.02em" },
+  dateNav: {
+    display: "flex",
+    alignItems: "center",
+    gap: 8,
+    margin: "12px 0",
+  },
+  dateInput: {
+    flex: 1,
+    border: "1px solid #d8cfbe",
+    borderRadius: 8,
+    padding: "8px 10px",
+    fontSize: 14,
+    background: "#fff",
+  },
+  todayBackButton: {
+    padding: "8px 12px",
+    border: "1px solid #8a6f4e",
+    background: "transparent",
+    color: "#8a6f4e",
+    borderRadius: 8,
+    fontSize: 13,
+    fontWeight: 700,
+    cursor: "pointer",
+    whiteSpace: "nowrap",
+  },
+  pastEditBanner: {
+    background: "#fbf3e7",
+    border: "1px solid #a06b3b",
+    color: "#8a6f4e",
+    borderRadius: 8,
+    padding: "10px 12px",
+    fontSize: 12,
+    marginBottom: 12,
+    lineHeight: 1.5,
+  },
   errorBox: {
     background: "#fbe2dc",
     color: "#8c2f1b",
