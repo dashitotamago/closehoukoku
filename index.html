@@ -4,9 +4,10 @@
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
 <title>売上報告</title>
-<script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
-<script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
-<script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+<link rel="preconnect" href="https://cdnjs.cloudflare.com" />
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.3.1/umd/react.production.min.js" crossorigin></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.3.1/umd/react-dom.production.min.js" crossorigin></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.25.6/babel.min.js"></script>
 <style>
   html, body { margin: 0; padding: 0; background: #f6f3ee; }
   #root { min-height: 100vh; }
@@ -173,6 +174,26 @@ async function storageSet(key, value) {
     body: JSON.stringify({ action: "set", key, value }),
   });
   return res.json();
+}
+
+// 複数キーを1回の通信でまとめて取得(サーバー往復を減らして高速化するため)
+// 戻り値: { key: {value} | null } のオブジェクト
+async function storageGetMany(keys) {
+  if (!keys || keys.length === 0) return {};
+  const res = await fetch(GAS_SHEET_WEBAPP_URL, {
+    method: "POST",
+    headers: { "Content-Type": "text/plain;charset=utf-8" },
+    body: JSON.stringify({ action: "getMany", keys }),
+  });
+  const json = await res.json();
+  const out = {};
+  if (json && json.ok && json.values) {
+    Object.keys(json.values).forEach((k) => {
+      const v = json.values[k];
+      out[k] = v === null || v === undefined ? null : { value: v };
+    });
+  }
+  return out;
 }
 const MIGRATION_WINDOW_DAYS = 31;
 
@@ -451,62 +472,82 @@ function DailyCashReport() {
     })();
   }, [date]);
 
-  // 過去分のコーヒー・牛乳データを取得(加重平均用)
+  // 過去分のコーヒー・牛乳データを取得(加重平均用) — 1回の通信でまとめて取得
   useEffect(() => {
     (async () => {
-      const items = [];
+      const dateList = [];
       for (let i = 1; i < AVG_WINDOW_DAYS; i++) {
-        const ds = dateStrDaysAgo(i);
-        try {
-          const r = await storageGet(`report:${ds}`);
-          if (r) {
-            const rep = JSON.parse(r.value);
-            const prods = rep.products || [];
-            const findQty = (name) => {
-              const found = prods.find((p) => (p.name || "").trim() === name);
-              return found ? Number(found.qty) || 0 : 0;
-            };
-            const breadSlices = BREAD_INGREDIENT_PRODUCTS.reduce(
-              (sum, name) => sum + findQty(name),
-              0
-            );
-            items.push({
-              date: ds,
-              daysAgo: i,
-              isWeekend: isWeekendOrHoliday(ds),
-              コーヒー: findQty("コーヒー"),
-              牛乳: findQty("牛乳"),
-              食パン: breadSlices,
-            });
-          }
-        } catch (e) {
-          // その日の記録なし
-        }
+        dateList.push(offsetDateStr(date, -i));
       }
+      const keys = dateList.map((ds) => `report:${ds}`);
+      let results = {};
+      try {
+        results = await storageGetMany(keys);
+      } catch (e) {
+        results = {};
+      }
+
+      const items = [];
+      dateList.forEach((ds, idx) => {
+        const r = results[`report:${ds}`];
+        if (!r) return;
+        try {
+          const rep = JSON.parse(r.value);
+          const prods = rep.products || [];
+          const findQty = (name) => {
+            const found = prods.find((p) => (p.name || "").trim() === name);
+            return found ? Number(found.qty) || 0 : 0;
+          };
+          const breadSlices = BREAD_INGREDIENT_PRODUCTS.reduce(
+            (sum, name) => sum + findQty(name),
+            0
+          );
+          items.push({
+            date: ds,
+            daysAgo: idx + 1,
+            isWeekend: isWeekendOrHoliday(ds),
+            コーヒー: findQty("コーヒー"),
+            牛乳: findQty("牛乳"),
+            食パン: breadSlices,
+          });
+        } catch (e) {
+          // 壊れたデータはスキップ
+        }
+      });
       setTrackedHistory(items);
     })();
   }, [date]);
 
-  // 当月の過去日分の売上合計を取得(月次累計売上用)
+  // 当月の過去日分の売上合計を取得(月次累計売上用) — 1回の通信でまとめて取得
   useEffect(() => {
     (async () => {
-      const todayObj = new Date(date + "T00:00:00");
-      const dayOfMonth = todayObj.getDate(); // 今日が何日か(1なら過去日なし)
+      const dateObj = new Date(date + "T00:00:00");
+      const dayOfMonth = dateObj.getDate(); // 選択中の日が何日か(1なら過去日なし)
+      const dateList = [];
+      for (let i = 1; i < dayOfMonth; i++) {
+        dateList.push(offsetDateStr(date, -i));
+      }
+      const keys = dateList.map((ds) => `report:${ds}`);
+      let results = {};
+      try {
+        results = await storageGetMany(keys);
+      } catch (e) {
+        results = {};
+      }
+
       let total = 0;
       let count = 0;
-      for (let i = 1; i < dayOfMonth; i++) {
-        const ds = dateStrDaysAgo(i);
+      dateList.forEach((ds) => {
+        const r = results[`report:${ds}`];
+        if (!r) return;
         try {
-          const r = await storageGet(`report:${ds}`);
-          if (r) {
-            const rep = JSON.parse(r.value);
-            total += Number(rep.totalSales) || 0;
-            count += 1;
-          }
+          const rep = JSON.parse(r.value);
+          total += Number(rep.totalSales) || 0;
+          count += 1;
         } catch (e) {
-          // その日の記録なし
+          // 壊れたデータはスキップ
         }
-      }
+      });
       setMonthlyPastTotal(total);
       setMonthlyPastDays(count);
     })();
@@ -796,23 +837,40 @@ function DailyCashReport() {
   };
 
   const buildMigrationPayload = async () => {
-    const historyReports = [];
+    const dateList = [];
     for (let i = 1; i <= MIGRATION_WINDOW_DAYS; i++) {
-      const ds = dateStrDaysAgo(i);
+      dateList.push(dateStrDaysAgo(i));
+    }
+    const keys = dateList.map((ds) => `report:${ds}`);
+    keys.push("app-state");
+    let results = {};
+    try {
+      results = await storageGetMany(keys);
+    } catch (e) {
+      results = {};
+    }
+
+    const historyReports = [];
+    dateList.forEach((ds) => {
+      const r = results[`report:${ds}`];
+      if (!r) return;
       try {
-        const r = await storageGet(`report:${ds}`);
-        if (r) historyReports.push({ date: ds, report: JSON.parse(r.value) });
+        historyReports.push({ date: ds, report: JSON.parse(r.value) });
       } catch (e) {
-        // その日の記録なし
+        // 壊れたデータはスキップ
+      }
+    });
+
+    let appState = null;
+    const stateResult = results["app-state"];
+    if (stateResult) {
+      try {
+        appState = JSON.parse(stateResult.value);
+      } catch (e) {
+        appState = null;
       }
     }
-    let appState = null;
-    try {
-      const r = await storageGet("app-state");
-      if (r) appState = JSON.parse(r.value);
-    } catch (e) {
-      appState = null;
-    }
+
     return {
       migrationVersion: 2,
       exportedAt: new Date().toISOString(),
@@ -896,51 +954,57 @@ function DailyCashReport() {
           }
         }
 
-        // 加重平均・月次集計を最新の状態に再取得
-        const rerun = [];
+        // 加重平均・月次集計を最新の状態に再取得(バッチ取得で高速化)
+        const rerunDates = [];
         for (let i = 1; i < AVG_WINDOW_DAYS; i++) {
-          const ds = dateStrDaysAgo(i);
-          try {
-            const r = await storageGet(`report:${ds}`);
-            if (r) {
-              const rep = JSON.parse(r.value);
-              const prods = rep.products || [];
-              const findQty = (name) => {
-                const found = prods.find((p) => (p.name || "").trim() === name);
-                return found ? Number(found.qty) || 0 : 0;
-              };
-              rerun.push({
-                date: ds,
-                daysAgo: i,
-                isWeekend: isWeekendOrHoliday(ds),
-                コーヒー: findQty("コーヒー"),
-                牛乳: findQty("牛乳"),
-                食パン: BREAD_INGREDIENT_PRODUCTS.reduce((s, n) => s + findQty(n), 0),
-              });
-            }
-          } catch (e) {
-            // なし
-          }
+          rerunDates.push(offsetDateStr(date, -i));
         }
+        const rerunResults = await storageGetMany(rerunDates.map((ds) => `report:${ds}`));
+        const rerun = [];
+        rerunDates.forEach((ds, idx) => {
+          const r = rerunResults[`report:${ds}`];
+          if (!r) return;
+          try {
+            const rep = JSON.parse(r.value);
+            const prods = rep.products || [];
+            const findQty = (name) => {
+              const found = prods.find((p) => (p.name || "").trim() === name);
+              return found ? Number(found.qty) || 0 : 0;
+            };
+            rerun.push({
+              date: ds,
+              daysAgo: idx + 1,
+              isWeekend: isWeekendOrHoliday(ds),
+              コーヒー: findQty("コーヒー"),
+              牛乳: findQty("牛乳"),
+              食パン: BREAD_INGREDIENT_PRODUCTS.reduce((s, n) => s + findQty(n), 0),
+            });
+          } catch (e) {
+            // 壊れたデータはスキップ
+          }
+        });
         setTrackedHistory(rerun);
 
-        const todayObj = new Date(date + "T00:00:00");
-        const dayOfMonth = todayObj.getDate();
+        const dateObj = new Date(date + "T00:00:00");
+        const dayOfMonth = dateObj.getDate();
+        const monthDates = [];
+        for (let i = 1; i < dayOfMonth; i++) {
+          monthDates.push(offsetDateStr(date, -i));
+        }
+        const monthResults = await storageGetMany(monthDates.map((ds) => `report:${ds}`));
         let mTotal = 0;
         let mCount = 0;
-        for (let i = 1; i < dayOfMonth; i++) {
-          const ds = dateStrDaysAgo(i);
+        monthDates.forEach((ds) => {
+          const r = monthResults[`report:${ds}`];
+          if (!r) return;
           try {
-            const r = await storageGet(`report:${ds}`);
-            if (r) {
-              const rep = JSON.parse(r.value);
-              mTotal += Number(rep.totalSales) || 0;
-              mCount += 1;
-            }
+            const rep = JSON.parse(r.value);
+            mTotal += Number(rep.totalSales) || 0;
+            mCount += 1;
           } catch (e) {
-            // なし
+            // 壊れたデータはスキップ
           }
-        }
+        });
         setMonthlyPastTotal(mTotal);
         setMonthlyPastDays(mCount);
 
