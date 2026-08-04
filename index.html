@@ -314,13 +314,13 @@ function DailyCashReport() {
     const file = e.target.files && e.target.files[0];
     e.target.value = "";
     if (!file) return;
-    setOcrLoading("products");
-    setOcrError("");
-    setOcrNotice("");
     if (!apiKey.trim()) {
       setOcrError("先に上の「Claude APIキー」欄にキーを入力・保存してください。");
       return;
     }
+    setOcrLoading("products");
+    setOcrError("");
+    setOcrNotice("");
     try {
       const base64 = await fileToResizedBase64(file);
       const mediaType = "image/jpeg";
@@ -417,6 +417,12 @@ function DailyCashReport() {
       setOcrLoading("");
     }
   };
+
+  // 保険: 何らかの理由でデータ読み込みが終わらなくても、20秒で強制的に画面を表示する
+  useEffect(() => {
+    const t = setTimeout(() => setLoading(false), 20000);
+    return () => clearTimeout(t);
+  }, [date]);
 
   // load state whenever the selected date changes
   useEffect(() => {
@@ -1053,7 +1059,14 @@ function DailyCashReport() {
   if (loading) {
     return (
       <div style={styles.page}>
-        <div style={styles.loading}>読み込み中...</div>
+        <div style={styles.loading}>
+          読み込み中...
+          <div style={{ marginTop: 16 }}>
+            <button style={styles.migrationToggle} onClick={() => setLoading(false)}>
+              進まない場合はここを押して開く
+            </button>
+          </div>
+        </div>
       </div>
     );
   }
