@@ -153,10 +153,26 @@ const AVG_WINDOW_DAYS = 14;
 // デプロイしたGASウェブアプリのURL(.../exec で終わるもの)をここに貼り付けてください
 const GAS_SHEET_WEBAPP_URL = "https://script.google.com/macros/s/AKfycbyMkOjuRbRunsrRpwydC-QVDHFLV_iPsrLD4bRsU8OV6XeZ-tHX3-w93Jt6CO5N9CoV/exec";
 
+// 応答がない通信をいつまでも待たないよう、タイムアウト付きでfetchする
+async function fetchWithTimeout(url, options, timeoutMs) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs || 15000);
+  try {
+    return await fetch(url, { ...options, signal: controller.signal });
+  } catch (e) {
+    if (e && e.name === "AbortError") {
+      throw new Error("通信がタイムアウトしました(スプレッドシート側の応答がありません)");
+    }
+    throw e;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 // Googleスプレッドシート(GAS)を保存先として使うための共通関数
 // window.storage.get/set と互換の形({value}を返す/nullを返す)にしてある
 async function storageGet(key) {
-  const res = await fetch(GAS_SHEET_WEBAPP_URL, {
+  const res = await fetchWithTimeout(GAS_SHEET_WEBAPP_URL, {
     method: "POST",
     headers: { "Content-Type": "text/plain;charset=utf-8" },
     body: JSON.stringify({ action: "get", key }),
@@ -167,7 +183,7 @@ async function storageGet(key) {
 }
 
 async function storageSet(key, value) {
-  const res = await fetch(GAS_SHEET_WEBAPP_URL, {
+  const res = await fetchWithTimeout(GAS_SHEET_WEBAPP_URL, {
     method: "POST",
     headers: { "Content-Type": "text/plain;charset=utf-8" },
     body: JSON.stringify({ action: "set", key, value }),
@@ -179,7 +195,7 @@ async function storageSet(key, value) {
 // 戻り値: { key: {value} | null } のオブジェクト
 async function storageGetMany(keys) {
   if (!keys || keys.length === 0) return {};
-  const res = await fetch(GAS_SHEET_WEBAPP_URL, {
+  const res = await fetchWithTimeout(GAS_SHEET_WEBAPP_URL, {
     method: "POST",
     headers: { "Content-Type": "text/plain;charset=utf-8" },
     body: JSON.stringify({ action: "getMany", keys }),
